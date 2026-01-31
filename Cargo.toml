@@ -2,7 +2,7 @@
 name = "xcqa"
 version = "0.1.0"
 edition = "2024"
-authors = ["XCQA Contributors"]
+authors = ["rand0mdevel0per"]
 description = "Dictionary-based cryptosystem with zero-knowledge proof signatures"
 license = "MIT"
 repository = "https://github.com/rand0mdevel0per/xcqa"
