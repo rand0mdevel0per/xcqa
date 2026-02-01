@@ -13,11 +13,17 @@ XCQA (XC Quick Algo) is an experimental cryptographic library that implements:
 ## Features
 
 ✓ **Cascading Multi-Layer Encoding**: Four-layer dictionary structure with 55% ciphertext expansion
+
 ✓ **IND-CPA Security**: Randomized padding for semantic security
+
 ✓ **Zstd Compression**: Reduces expansion from 1.55x to 1.19x (23% improvement)
+
 ✓ **Unified Config API**: Flexible encryption options with sensible defaults
+
 ✓ **Zero-Knowledge Proof Signatures**: Sign messages without revealing private key
+
 ✓ **Collision Resistance**: Different plaintexts produce different ciphertexts
+
 ✓ **Comprehensive Test Suite**: 26 tests covering encryption, signatures, and cryptographic properties
 
 ## Installation
@@ -203,3 +209,16 @@ Created as part of cryptographic research into dictionary-based encryption schem
 Built with Rust 🦀 using:
 - `rand` for random number generation
 - `sha2` for cryptographic hashing
+
+## Citation
+
+If you use XCQA in your research, please cite:
+
+```bibtex
+@software{xcqa2026,
+  title={XCQA: Dictionary-Based Cryptosystem with Zero-Knowledge Signatures},
+  author={rand0mdevel0per, Anthropic Claude Sonnet 4.5},
+  year={2026},
+  url={https://github.com/rand0mdevel0per/xcqa}
+}
+```

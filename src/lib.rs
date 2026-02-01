@@ -3,6 +3,7 @@ use rand::Rng;
 use sha2::{Sha256, Digest};
 
 pub mod config;
+pub mod simd;
 use config::{DictionaryConfig, LayerConfig, EncryptionConfig};
 
 /// Bit stream for encoding/decoding
@@ -11,30 +12,15 @@ struct BitStream {
 }
 
 impl BitStream {
-    /// Create from bytes
+    /// Create from bytes (SIMD-optimized)
     fn from_bytes(bytes: &[u8]) -> Self {
-        let mut bits = Vec::new();
-        for byte in bytes {
-            for i in (0..8).rev() {
-                bits.push((byte >> i) & 1 == 1);
-            }
-        }
+        let bits = simd::bytes_to_bits_simd(bytes);
         BitStream { bits }
     }
 
-    /// Convert to bytes
+    /// Convert to bytes (SIMD-optimized)
     fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for chunk in self.bits.chunks(8) {
-            let mut byte = 0u8;
-            for (i, &bit) in chunk.iter().enumerate() {
-                if bit {
-                    byte |= 1 << (7 - i);
-                }
-            }
-            bytes.push(byte);
-        }
-        bytes
+        simd::bits_to_bytes_simd(&self.bits)
     }
 
     /// Read n bits as u64
