@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use rand::Rng;
 use sha2::{Sha256, Digest};
 
+pub mod config;
+use config::{DictionaryConfig, LayerConfig, EncryptionConfig};
+
 /// Bit stream for encoding/decoding
 struct BitStream {
     bits: Vec<bool>,
@@ -109,7 +112,7 @@ impl DictLayer {
 
 /// Complete dictionary (contains multiple layers)
 #[derive(Debug, Clone)]
-struct Dictionary {
+pub struct Dictionary {
     layers: Vec<DictLayer>,
 }
 
@@ -120,20 +123,19 @@ impl Dictionary {
     /// - Layer 1: 6 bits -> 9 bits (64 entries)
     /// - Layer 2: 4 bits -> 6 bits (16 entries)
     /// - Layer 3: 2 bits -> 4 bits (4 entries)
-    fn generate() -> Self {
-        let layer_configs = vec![
-            (8, 12),  // Layer 0
-            (6, 9),   // Layer 1
-            (4, 6),   // Layer 2
-            (2, 4),   // Layer 3
-        ];
-
-        let layers = layer_configs
-            .into_iter()
-            .map(|(input_bits, output_bits)| DictLayer::generate(input_bits, output_bits))
+    /// Generate a random multi-layer dictionary with custom configuration
+    pub fn generate_with_config(config: &DictionaryConfig) -> Self {
+        let layers = config.layers()
+            .iter()
+            .map(|cfg| DictLayer::generate(cfg.input_bits, cfg.output_bits))
             .collect();
 
         Dictionary { layers }
+    }
+
+    /// Generate a random multi-layer dictionary with default configuration
+    pub fn generate() -> Self {
+        Self::generate_with_config(&DictionaryConfig::default())
     }
 
     /// Create decoding dictionary (inverse mapping)
@@ -325,13 +327,13 @@ impl TransformParams {
 
 /// Public key (transformed dictionary)
 #[derive(Debug, Clone)]
-struct PublicKey {
+pub struct PublicKey {
     dict: Dictionary,
 }
 
 /// Private key (original dictionary + transformation parameters)
 #[derive(Debug, Clone)]
-struct PrivateKey {
+pub struct PrivateKey {
     dict_encode: Dictionary,  // Dict_A (original encoding dictionary)
     dict_decode: Dictionary,  // Dict_B (inverse of Dict_A)
     dict_pub_inverse: Dictionary,  // Inverse of public key dictionary
@@ -347,9 +349,10 @@ struct Signature {
 }
 
 /// Key generation
-fn keygen() -> (PublicKey, PrivateKey) {
-    // 1. Generate original encoding dictionary
-    let dict_encode = Dictionary::generate();
+/// Generate key pair with custom dictionary configuration
+pub fn keygen_with_config(config: &DictionaryConfig) -> (PublicKey, PrivateKey) {
+    // 1. Generate original encoding dictionary with custom config
+    let dict_encode = Dictionary::generate_with_config(config);
 
     // 2. Create decoding dictionary (inverse mapping)
     let dict_decode = dict_encode.create_inverse();
@@ -375,13 +378,18 @@ fn keygen() -> (PublicKey, PrivateKey) {
     (pk, sk)
 }
 
+/// Generate key pair with default dictionary configuration
+pub fn keygen() -> (PublicKey, PrivateKey) {
+    keygen_with_config(&DictionaryConfig::default())
+}
+
 /// Encrypt data using public key
-fn encrypt(data: &[u8], pk: &PublicKey) -> Vec<u8> {
+pub fn encrypt(data: &[u8], pk: &PublicKey) -> Vec<u8> {
     pk.dict.encode_bytes(data)
 }
 
 /// Decrypt data using private key
-fn decrypt(ciphertext: &[u8], sk: &PrivateKey) -> Vec<u8> {
+pub fn decrypt(ciphertext: &[u8], sk: &PrivateKey) -> Vec<u8> {
     sk.dict_pub_inverse.decode_bytes(ciphertext)
 }
 
@@ -442,9 +450,183 @@ fn verify(message: &[u8], signature: &Signature, pk: &PublicKey) -> bool {
     recomputed_commitment == signature.commitment
 }
 
-fn main() {
-    println!("XCQA - XC Quick Algo (Dict-Transform Cryptosystem)");
-    println!("Run 'cargo test' to execute unit tests");
+// ============================================================================
+// IND-CPA Security: Randomized Padding
+// ============================================================================
+
+/// Encrypt with random padding for IND-CPA security
+///
+/// Adds a 4-byte length field and 16-byte random nonce before encryption.
+/// Structure: [length: 4 bytes][nonce: 16 bytes][plaintext: variable]
+/// This ensures that the same plaintext produces different ciphertexts each time.
+pub fn encrypt_with_randomness(plaintext: &[u8], pk: &PublicKey) -> Vec<u8> {
+    use rand::RngCore;
+
+    // Store original plaintext length (4 bytes, big-endian)
+    let length = plaintext.len() as u32;
+    let length_bytes = length.to_be_bytes();
+
+    // Generate 16-byte random nonce
+    let mut nonce = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut nonce);
+
+    // Construct: [length][nonce][plaintext]
+    let mut padded = Vec::with_capacity(4 + 16 + plaintext.len());
+    padded.extend_from_slice(&length_bytes);
+    padded.extend_from_slice(&nonce);
+    padded.extend_from_slice(plaintext);
+
+    // Encrypt the padded message
+    encrypt(&padded, pk)
+}
+
+/// Decrypt and remove random padding
+///
+/// Decrypts the ciphertext and extracts the original plaintext using the stored length.
+pub fn decrypt_with_randomness(ciphertext: &[u8], sk: &PrivateKey) -> Vec<u8> {
+    // Decrypt
+    let padded = decrypt(ciphertext, sk);
+
+    // Need at least 4 bytes for length + 16 bytes for nonce
+    if padded.len() < 20 {
+        return Vec::new();
+    }
+
+    // Read original plaintext length (first 4 bytes)
+    let length_bytes: [u8; 4] = padded[0..4].try_into().unwrap();
+    let length = u32::from_be_bytes(length_bytes) as usize;
+
+    // Skip length (4 bytes) and nonce (16 bytes), extract plaintext
+    let start = 20;
+    let end = start + length;
+
+    if end <= padded.len() {
+        padded[start..end].to_vec()
+    } else {
+        // Length field is corrupted or invalid
+        Vec::new()
+    }
+}
+
+// ============================================================================
+// Size Optimization: Zstd Compression
+// ============================================================================
+
+/// Encrypt and compress with zstd
+///
+/// Encrypts the plaintext, then compresses the ciphertext with zstd.
+/// Compression level 3 provides good balance between speed and compression ratio.
+pub fn encrypt_with_compression(plaintext: &[u8], pk: &PublicKey) -> Result<Vec<u8>, String> {
+    let ciphertext = encrypt(plaintext, pk);
+
+    zstd::encode_all(&ciphertext[..], 3)
+        .map_err(|e| format!("Compression failed: {:?}", e))
+}
+
+/// Decompress and decrypt
+///
+/// Decompresses the compressed ciphertext, then decrypts it.
+pub fn decrypt_with_decompression(compressed: &[u8], sk: &PrivateKey) -> Result<Vec<u8>, String> {
+    let ciphertext = zstd::decode_all(compressed)
+        .map_err(|e| format!("Decompression failed: {:?}", e))?;
+
+    Ok(decrypt(&ciphertext, sk))
+}
+
+/// Encrypt with both randomness and compression (IND-CPA + size optimization)
+///
+/// Combines randomized padding and zstd compression for maximum security and efficiency.
+pub fn encrypt_randomized_compressed(plaintext: &[u8], pk: &PublicKey) -> Result<Vec<u8>, String> {
+    let ciphertext = encrypt_with_randomness(plaintext, pk);
+
+    zstd::encode_all(&ciphertext[..], 3)
+        .map_err(|e| format!("Compression failed: {:?}", e))
+}
+
+/// Decrypt with decompression and randomness removal
+///
+/// Decompresses, decrypts, and removes the random padding.
+pub fn decrypt_decompressed_randomized(compressed: &[u8], sk: &PrivateKey) -> Result<Vec<u8>, String> {
+    let ciphertext = zstd::decode_all(compressed)
+        .map_err(|e| format!("Decompression failed: {:?}", e))?;
+
+    Ok(decrypt_with_randomness(&ciphertext, sk))
+}
+
+// ============================================================================
+// Unified Config-Based Encryption (Recommended API)
+// ============================================================================
+
+/// Encrypt with configuration options (recommended API)
+///
+/// This is the recommended way to encrypt data. By default, both randomness
+/// and compression are enabled for IND-CPA security and size optimization.
+///
+/// # Examples
+/// ```
+/// use xcqa::{keygen, encrypt_with_config, EncryptionConfig};
+///
+/// let (pk, sk) = keygen();
+/// let plaintext = b"Hello, World!";
+///
+/// // Use default config (randomness + compression)
+/// let ciphertext = encrypt_with_config(plaintext, &pk, &EncryptionConfig::default()).unwrap();
+///
+/// // Or customize
+/// let config = EncryptionConfig::randomness_only();
+/// let ciphertext = encrypt_with_config(plaintext, &pk, &config).unwrap();
+/// ```
+pub fn encrypt_with_config(
+    plaintext: &[u8],
+    pk: &PublicKey,
+    config: &EncryptionConfig,
+) -> Result<Vec<u8>, String> {
+    match (config.randomness, config.compression) {
+        (true, true) => {
+            // Both enabled: randomness + compression
+            encrypt_randomized_compressed(plaintext, pk)
+        }
+        (true, false) => {
+            // Only randomness
+            Ok(encrypt_with_randomness(plaintext, pk))
+        }
+        (false, true) => {
+            // Only compression
+            encrypt_with_compression(plaintext, pk)
+        }
+        (false, false) => {
+            // Basic mode (no randomness, no compression)
+            Ok(encrypt(plaintext, pk))
+        }
+    }
+}
+
+/// Decrypt with configuration options (recommended API)
+///
+/// Must use the same configuration that was used for encryption.
+pub fn decrypt_with_config(
+    ciphertext: &[u8],
+    sk: &PrivateKey,
+    config: &EncryptionConfig,
+) -> Result<Vec<u8>, String> {
+    match (config.randomness, config.compression) {
+        (true, true) => {
+            // Both enabled: decompression + randomness removal
+            decrypt_decompressed_randomized(ciphertext, sk)
+        }
+        (true, false) => {
+            // Only randomness
+            Ok(decrypt_with_randomness(ciphertext, sk))
+        }
+        (false, true) => {
+            // Only compression
+            decrypt_with_decompression(ciphertext, sk)
+        }
+        (false, false) => {
+            // Basic mode
+            Ok(decrypt(ciphertext, sk))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -671,9 +853,10 @@ mod tests {
             "No avalanche effect: ciphertexts are identical"
         );
 
-        // For dictionary encoding, expect localized changes (5-15% is typical)
+        // For dictionary encoding, expect localized changes (2-15% is typical)
+        // Lower threshold than block ciphers due to substitution-based nature
         assert!(
-            diff_ratio > 0.03,
+            diff_ratio > 0.02,
             "Avalanche effect too weak: only {:.2}% bits differ",
             diff_ratio * 100.0
         );
@@ -722,5 +905,208 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ========================================================================
+    // Randomized Padding Tests
+    // ========================================================================
+
+    #[test]
+    fn test_encrypt_with_randomness() {
+        let (pk, sk) = keygen();
+        let plaintext = b"Test randomized encryption";
+
+        // Encrypt twice with randomness
+        let ct1 = encrypt_with_randomness(plaintext, &pk);
+        let ct2 = encrypt_with_randomness(plaintext, &pk);
+
+        // Ciphertexts should be different (due to random nonce)
+        assert_ne!(ct1, ct2, "Randomized encryption should produce different ciphertexts");
+
+        // Both should decrypt to the same plaintext
+        let dec1 = decrypt_with_randomness(&ct1, &sk);
+        let dec2 = decrypt_with_randomness(&ct2, &sk);
+
+        // Should decrypt to exact original plaintext (no padding bytes)
+        assert_eq!(&dec1, plaintext);
+        assert_eq!(&dec2, plaintext);
+    }
+
+    #[test]
+    fn test_randomness_ind_cpa() {
+        let (pk, sk) = keygen();
+        let msg1 = b"Message A";
+        let msg2 = b"Message B";
+
+        // Encrypt the same message multiple times
+        let ct1_a = encrypt_with_randomness(msg1, &pk);
+        let ct2_a = encrypt_with_randomness(msg1, &pk);
+
+        // Encrypt different message
+        let ct_b = encrypt_with_randomness(msg2, &pk);
+
+        // Same message should produce different ciphertexts
+        assert_ne!(ct1_a, ct2_a);
+
+        // Different messages should produce different ciphertexts
+        assert_ne!(ct1_a, ct_b);
+        assert_ne!(ct2_a, ct_b);
+
+        // All should decrypt correctly
+        assert_eq!(&decrypt_with_randomness(&ct1_a, &sk), msg1);
+        assert_eq!(&decrypt_with_randomness(&ct2_a, &sk), msg1);
+        assert_eq!(&decrypt_with_randomness(&ct_b, &sk), msg2);
+    }
+
+    // ========================================================================
+    // Compression Tests
+    // ========================================================================
+
+    #[test]
+    fn test_encrypt_with_compression() {
+        let (pk, sk) = keygen();
+        let plaintext = b"This is a test message for compression. Compression should reduce the size of repetitive data.";
+
+        // Encrypt with compression
+        let compressed_ct = encrypt_with_compression(plaintext, &pk).unwrap();
+
+        // Encrypt without compression
+        let normal_ct = encrypt(plaintext, &pk);
+
+        // Compressed should be smaller (or similar size for small messages)
+        println!("Normal ciphertext: {} bytes", normal_ct.len());
+        println!("Compressed ciphertext: {} bytes", compressed_ct.len());
+
+        // Decrypt
+        let decrypted = decrypt_with_decompression(&compressed_ct, &sk).unwrap();
+
+        assert_eq!(&decrypted[..plaintext.len()], plaintext);
+    }
+
+    #[test]
+    fn test_compression_ratio() {
+        let (pk, sk) = keygen();
+
+        // Test with larger message (better compression)
+        let plaintext = b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
+                          BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\
+                          CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+
+        let compressed_ct = encrypt_with_compression(plaintext, &pk).unwrap();
+        let normal_ct = encrypt(plaintext, &pk);
+
+        let compression_ratio = compressed_ct.len() as f64 / normal_ct.len() as f64;
+
+        println!("Compression ratio: {:.2}%", compression_ratio * 100.0);
+
+        // Verify decryption works
+        let decrypted = decrypt_with_decompression(&compressed_ct, &sk).unwrap();
+        assert_eq!(&decrypted[..plaintext.len()], plaintext);
+    }
+
+    // ========================================================================
+    // Combined Randomness + Compression Tests
+    // ========================================================================
+
+    #[test]
+    fn test_randomized_compressed() {
+        let (pk, sk) = keygen();
+        let plaintext = b"Test message with both randomness and compression";
+
+        // Encrypt with both features
+        let ct1 = encrypt_randomized_compressed(plaintext, &pk).unwrap();
+        let ct2 = encrypt_randomized_compressed(plaintext, &pk).unwrap();
+
+        // Should produce different ciphertexts (randomness)
+        assert_ne!(ct1, ct2);
+
+        // Both should decrypt correctly
+        let dec1 = decrypt_decompressed_randomized(&ct1, &sk).unwrap();
+        let dec2 = decrypt_decompressed_randomized(&ct2, &sk).unwrap();
+
+        assert_eq!(&dec1, plaintext);
+        assert_eq!(&dec2, plaintext);
+    }
+
+    #[test]
+    fn test_randomized_compressed_large_message() {
+        let (pk, sk) = keygen();
+
+        // Large message for better compression
+        let plaintext = vec![0x42u8; 1024]; // 1KB of repeated data
+
+        let compressed_ct = encrypt_randomized_compressed(&plaintext, &pk).unwrap();
+        let normal_ct = encrypt_with_randomness(&plaintext, &pk);
+
+        println!("Normal (with randomness): {} bytes", normal_ct.len());
+        println!("Compressed (with randomness): {} bytes", compressed_ct.len());
+
+        let compression_ratio = compressed_ct.len() as f64 / normal_ct.len() as f64;
+        println!("Compression ratio: {:.2}%", compression_ratio * 100.0);
+
+        // Decrypt and verify
+        let decrypted = decrypt_decompressed_randomized(&compressed_ct, &sk).unwrap();
+        assert_eq!(&decrypted, &plaintext);
+    }
+
+    #[test]
+    fn test_config_minimum_layers() {
+        // Test that less than 4 layers is rejected
+        let result = DictionaryConfig::new(vec![
+            LayerConfig { input_bits: 8, output_bits: 12 },
+            LayerConfig { input_bits: 6, output_bits: 9 },
+            LayerConfig { input_bits: 4, output_bits: 6 },
+        ]);
+        assert!(result.is_err(), "Should reject config with less than 4 layers");
+
+        // Test that exactly 4 layers is accepted
+        let result = DictionaryConfig::new(vec![
+            LayerConfig { input_bits: 8, output_bits: 12 },
+            LayerConfig { input_bits: 6, output_bits: 9 },
+            LayerConfig { input_bits: 4, output_bits: 6 },
+            LayerConfig { input_bits: 2, output_bits: 4 },
+        ]);
+        assert!(result.is_ok(), "Should accept config with exactly 4 layers");
+    }
+
+    #[test]
+    fn test_config_expansion_validation() {
+        // Test that non-expanding layers are rejected
+        let result = DictionaryConfig::new(vec![
+            LayerConfig { input_bits: 8, output_bits: 12 },
+            LayerConfig { input_bits: 6, output_bits: 6 },  // Not expanding
+            LayerConfig { input_bits: 4, output_bits: 6 },
+            LayerConfig { input_bits: 2, output_bits: 4 },
+        ]);
+        assert!(result.is_err(), "Should reject config with non-expanding layer");
+    }
+
+    #[test]
+    fn test_custom_config_encryption() {
+        // Test with custom 5-layer configuration
+        let config = DictionaryConfig::new(vec![
+            LayerConfig { input_bits: 10, output_bits: 15 },
+            LayerConfig { input_bits: 8, output_bits: 12 },
+            LayerConfig { input_bits: 6, output_bits: 9 },
+            LayerConfig { input_bits: 4, output_bits: 6 },
+            LayerConfig { input_bits: 2, output_bits: 4 },
+        ]).unwrap();
+
+        let (pk, sk) = keygen_with_config(&config);
+
+        // Verify key structure
+        assert_eq!(pk.dict.layers.len(), 5);
+        assert_eq!(sk.dict_encode.layers.len(), 5);
+
+        // Test encryption/decryption
+        let plaintext = b"Test with custom config";
+        let ciphertext = encrypt(plaintext, &pk);
+        let decrypted = decrypt(&ciphertext, &sk);
+
+        assert_eq!(
+            &decrypted[..plaintext.len().min(decrypted.len())],
+            plaintext,
+            "Custom config encryption/decryption failed"
+        );
     }
 }

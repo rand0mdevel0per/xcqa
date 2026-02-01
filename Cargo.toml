@@ -13,3 +13,11 @@ readme = "README.md"
 [dependencies]
 rand = "0.8"
 sha2 = "0.10"
+zstd = "0.13"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "xcqa_bench"
+harness = false
