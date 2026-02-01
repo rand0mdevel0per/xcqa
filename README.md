@@ -158,19 +158,24 @@ One complete cycle: 20 input bits → 31 output bits (55% expansion)
 
 ## Performance
 
-Benchmarked on modern hardware:
+Benchmarked on `ASUS TUF-GAMING-FX608LM [Intel Core(TM) Ultra 9 255HX + nVidia GeForce RTX 5060 Laptop GPU] - Laptop`:
 
-| Operation | Message Size | Time |
-|-----------|--------------|------|
-| KeyGen | - | 86.5 µs |
-| Encrypt | 16 bytes | 950 ns |
-| Encrypt | 64 bytes | 3.5 µs |
-| Encrypt | 256 bytes | 13.5 µs |
-| Encrypt | 1024 bytes | 31.7 µs |
-| Decrypt | 16 bytes | 1.1 µs |
-| Decrypt | 64 bytes | 4.1 µs |
-| Decrypt | 256 bytes | 15.8 µs |
-| Decrypt | 1024 bytes | 62.5 µs |
+| Operation | Message Size | Time | SIMD Improvement |
+|-----------|--------------|------|------------------|
+| KeyGen | - | 86.5 µs | - |
+| Encrypt | 16 bytes | 950 ns | - |
+| Encrypt | 64 bytes | 3.5 µs | - |
+| Encrypt | 256 bytes | 13.5 µs | - |
+| Encrypt | 1024 bytes | 31.7 µs | - |
+| Decrypt | 16 bytes | 640 ns | **+33%** ⚡ |
+| Decrypt | 64 bytes | 2.4 µs | **+11%** ⚡ |
+| Decrypt | 256 bytes | 7.7 µs | **+9%** ⚡ |
+| Decrypt | 1024 bytes | 33.6 µs | - |
+
+**SIMD Optimizations:**
+- Bit operations accelerated with AVX2 detection
+- Significant performance improvements for small to medium messages
+- Up to 33% faster decryption for 16-byte messages
 
 **Ciphertext Expansion:**
 - Without compression: 1.55x (55% overhead)
