@@ -13,10 +13,12 @@ XCQA (XC Quick Algo) is an experimental cryptographic library that implements:
 ## Features
 
 ✓ **Cascading Multi-Layer Encoding**: Four-layer dictionary structure with 55% ciphertext expansion
+✓ **IND-CPA Security**: Randomized padding for semantic security
+✓ **Zstd Compression**: Reduces expansion from 1.55x to 1.19x (23% improvement)
+✓ **Unified Config API**: Flexible encryption options with sensible defaults
 ✓ **Zero-Knowledge Proof Signatures**: Sign messages without revealing private key
-✓ **Deterministic Encryption**: Same plaintext + key always produces same ciphertext
 ✓ **Collision Resistance**: Different plaintexts produce different ciphertexts
-✓ **Comprehensive Test Suite**: 17 tests covering encryption, signatures, and cryptographic properties
+✓ **Comprehensive Test Suite**: 26 tests covering encryption, signatures, and cryptographic properties
 
 ## Installation
 
@@ -29,7 +31,38 @@ xcqa = "0.1.0"
 
 ## Quick Start
 
-### Encryption/Decryption
+### Recommended: Unified Config API (IND-CPA Secure)
+
+```rust
+use xcqa::{keygen, encrypt_with_config, decrypt_with_config, EncryptionConfig};
+
+// Generate key pair
+let (public_key, private_key) = keygen();
+
+// Encrypt with default config (randomness + compression)
+let plaintext = b"Hello, XCQA!";
+let ciphertext = encrypt_with_config(plaintext, &public_key, &EncryptionConfig::default())?;
+
+// Decrypt with same config
+let decrypted = decrypt_with_config(&ciphertext, &private_key, &EncryptionConfig::default())?;
+assert_eq!(plaintext, &decrypted[..]);
+```
+
+### Custom Configuration
+
+```rust
+// Only randomness (IND-CPA secure, no compression)
+let config = EncryptionConfig::randomness_only();
+let ciphertext = encrypt_with_config(plaintext, &public_key, &config)?;
+
+// Only compression (not IND-CPA secure)
+let config = EncryptionConfig::compression_only();
+
+// Basic mode (no randomness, no compression)
+let config = EncryptionConfig::basic();
+```
+
+### Basic Encryption/Decryption (Legacy)
 
 ```rust
 use xcqa::{keygen, encrypt, decrypt};
@@ -119,9 +152,25 @@ One complete cycle: 20 input bits → 31 output bits (55% expansion)
 
 ## Performance
 
-Ciphertext expansion: ~55% (20 bits → 31 bits per cycle)
+Benchmarked on modern hardware:
 
-Example: 100 bytes plaintext → ~155 bytes ciphertext
+| Operation | Message Size | Time |
+|-----------|--------------|------|
+| KeyGen | - | 86.5 µs |
+| Encrypt | 16 bytes | 950 ns |
+| Encrypt | 64 bytes | 3.5 µs |
+| Encrypt | 256 bytes | 13.5 µs |
+| Encrypt | 1024 bytes | 31.7 µs |
+| Decrypt | 16 bytes | 1.1 µs |
+| Decrypt | 64 bytes | 4.1 µs |
+| Decrypt | 256 bytes | 15.8 µs |
+| Decrypt | 1024 bytes | 62.5 µs |
+
+**Ciphertext Expansion:**
+- Without compression: 1.55x (55% overhead)
+- With compression: 1.19x (19% overhead) - 23% improvement
+
+See [docs/BENCHMARK.md](docs/BENCHMARK.md) for detailed performance analysis.
 
 ## Testing
 
