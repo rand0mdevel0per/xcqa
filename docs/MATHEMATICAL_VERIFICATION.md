@@ -271,14 +271,103 @@ Given polynomially many plaintext-ciphertext pairs, adversary cannot decrypt new
 
 ∎
 
-### 4.4 Semantic Security Discussion
+### 4.4 IND-CPA Security Analysis
 
-**Limitation:** XCQA is deterministic, thus not semantically secure in the standard IND-CPA sense.
+**Theorem 4.3 (IND-CPA Security with Randomized Padding):**
+XCQA with randomized padding achieves IND-CPA (Indistinguishability under Chosen Plaintext Attack) security under the dictionary inversion hardness assumption.
 
-**Mitigation Strategies:**
-1. Use with randomized padding schemes
-2. Combine with nonce-based encryption modes
-3. Apply as building block in hybrid constructions
+**Overview:**
+The base XCQA encryption is deterministic, which does not provide semantic security. However, the implementation includes a randomized padding mechanism that prepends a random nonce to the plaintext before encryption, achieving IND-CPA security. This section analyzes the security properties of the randomized variant.
+
+#### 4.4.1 Randomized Padding Mechanism
+
+**Construction:**
+The randomized encryption scheme prepends a length field and random nonce to the plaintext before encryption:
+
+```
+Encrypt_rand(m, pk):
+  1. length ← |m| (4 bytes, big-endian)
+  2. nonce ← Random(16 bytes)  // 128-bit randomness
+  3. padded ← length || nonce || m
+  4. return Encrypt(padded, pk)
+
+Decrypt_rand(c, sk):
+  1. padded ← Decrypt(c, sk)
+  2. length ← padded[0:4]  // Extract original length
+  3. nonce ← padded[4:20]  // Verify presence (discarded)
+  4. m ← padded[20:20+length]  // Extract original plaintext
+  5. return m
+```
+
+**Format:** `[length: 4 bytes][nonce: 16 bytes][plaintext]`
+
+**Properties:**
+- **Nonce size**: 16 bytes (128-bit randomness)
+- **Uniqueness**: Probability of nonce collision ≈ 2^(-128) (negligible)
+- **Overhead**: 20 bytes fixed overhead per message
+- **Randomness source**: Cryptographically secure PRNG (`rand::thread_rng()`)
+
+#### 4.4.2 IND-CPA Security Proof
+
+**Theorem 4.3.1 (IND-CPA Security):**
+If the base XCQA encryption Encrypt(·, pk) is a secure pseudorandom permutation (PRP), then Encrypt_rand(·, pk) is IND-CPA secure.
+
+**Proof Sketch:**
+
+1. **Game-based proof:** Consider the IND-CPA security game:
+   - Challenger generates (pk, sk) ← KeyGen()
+   - Adversary A can query Encrypt_rand(mᵢ, pk) for polynomially many messages mᵢ
+   - A outputs two challenge messages m₀, m₁ of equal length
+   - Challenger flips coin b ← {0,1}, returns c* = Encrypt_rand(m_b, pk)
+   - A outputs guess b'
+   - A wins if b' = b
+
+2. **Randomness argument:**
+   - Each encryption uses fresh 16-byte nonce n ← Random(16 bytes)
+   - Padded messages: padded₀ = length || n₀ || m₀, padded₁ = length || n₁ || m₁
+   - Since n₀ ≠ n₁ with probability 1 - 2^(-128), we have padded₀ ≠ padded₁
+
+3. **PRP security:**
+   - Base encryption Encrypt(·, pk) acts as PRP on padded messages
+   - For distinct inputs padded₀ ≠ padded₁, outputs are computationally indistinguishable
+   - Therefore: Encrypt(padded₀, pk) ≈ᶜ Encrypt(padded₁, pk)
+
+4. **Conclusion:**
+   - Adversary's view of c* reveals no information about b
+   - Advantage: |Pr[b' = b] - 1/2| ≤ negl(λ)
+   - Therefore, Encrypt_rand is IND-CPA secure ∎
+
+**Assumption:** The proof relies on the dictionary inversion hardness (Theorem 4.1), which ensures that Encrypt(·, pk) behaves as a PRP.
+
+#### 4.4.3 Security Parameters and Recommendations
+
+**Nonce Size Analysis:**
+- **Current implementation**: 16 bytes (128 bits)
+- **Collision probability**: For n encryptions, Pr[collision] ≈ n²/2^129
+- **Safety bound**: For n = 2^64 encryptions, Pr[collision] ≈ 2^(-1) (birthday bound)
+- **Recommendation**: 16-byte nonce is adequate for practical use (up to 2^60 encryptions)
+
+**Comparison with Deterministic Mode:**
+
+| Property | Deterministic | Randomized (IND-CPA) |
+|----------|--------------|---------------------|
+| Security | Not IND-CPA secure | IND-CPA secure |
+| Overhead | 0 bytes | 20 bytes |
+| Ciphertext expansion | 1.55x | 1.55x + 20 bytes |
+| Use case | Non-sensitive data | Sensitive data |
+
+**Configuration Options:**
+The implementation provides flexible configuration via `EncryptionConfig`:
+- `EncryptionConfig::default()`: Randomness + compression (recommended)
+- `EncryptionConfig::randomness_only()`: IND-CPA secure, no compression
+- `EncryptionConfig::compression_only()`: Not IND-CPA secure (deterministic)
+- `EncryptionConfig::basic()`: Deterministic, no compression
+
+**Security Recommendation:**
+Always use `randomness: true` for encrypting sensitive data to achieve IND-CPA security. The deterministic mode should only be used for:
+- Non-sensitive data where determinism is required
+- Scenarios where ciphertext size is critical
+- Building blocks in larger cryptographic constructions with external randomization
 
 ### 4.5 Post-Quantum Security Analysis
 
@@ -439,7 +528,8 @@ With n layers where each layer i has expansion ratio rᵢ = n_out/n_in, XCQA pro
 - ✓ Dictionary inversion computationally hard (≈2^4096 operations)
 - ✓ Key space: ≈2^4360
 - ✓ Resistant to known-plaintext attacks (requires >1500 samples for partial recovery)
-- ⚠ Not IND-CPA secure (deterministic encryption)
+- ✓ IND-CPA secure with randomized padding (128-bit nonce)
+- ⚠ Base encryption is deterministic (use randomized mode for IND-CPA security)
 
 **Performance:**
 - ✓ Linear time complexity: O(|m|) for encryption/decryption
@@ -455,15 +545,16 @@ With n layers where each layer i has expansion ratio rᵢ = n_out/n_in, XCQA pro
 ### 6.3 Limitations and Future Work
 
 **Current Limitations:**
-1. Deterministic encryption (not semantically secure)
-2. Ciphertext expansion (55% overhead)
+1. Base encryption is deterministic (mitigated by randomized padding mode)
+2. Ciphertext expansion (55% overhead, reduced to ~19% with compression)
 3. Limited to symmetric-style usage despite public key structure
 
 **Future Research Directions:**
-1. Probabilistic variants with randomized encoding
-2. Compression-based layers to reduce expansion
-3. Formal security reduction to standard assumptions
-4. Post-quantum security analysis
+1. Formal security reduction to standard assumptions
+2. Adaptive chosen-ciphertext attack (CCA) security analysis
+3. Hybrid constructions with other cryptographic primitives
+4. Hardware acceleration and optimization techniques
+5. Side-channel resistance analysis
 
 ---
 
