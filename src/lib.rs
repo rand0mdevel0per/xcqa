@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use rand::Rng;
 use sha2::{Sha256, Digest};
+use zeroize::Zeroize;
 
 pub mod config;
 pub mod simd;
@@ -329,9 +330,9 @@ pub struct PrivateKey {
 /// Zero-knowledge signature
 /// Proves knowledge of private key without revealing it
 #[derive(Debug, Clone)]
-struct Signature {
-    commitment: Vec<u8>,  // C: encrypted nonce
-    response: Vec<u8>,    // s: nonce XOR challenge
+pub struct Signature {
+    pub commitment: Vec<u8>,  // C: encrypted nonce
+    pub response: Vec<u8>,    // s: nonce XOR challenge
 }
 
 /// Key generation
@@ -381,7 +382,12 @@ pub fn decrypt(ciphertext: &[u8], sk: &PrivateKey) -> Vec<u8> {
 
 /// Sign a message using zero-knowledge proof
 /// Proves knowledge of private key without revealing it
-fn sign(message: &[u8], sk: &PrivateKey, pk: &PublicKey) -> Signature {
+pub fn sign(message: &[u8], sk: &PrivateKey, pk: &PublicKey) -> Signature {
+    sign_with_context(message, sk, pk, &[])
+}
+
+/// Sign with additional context (e.g., block hash for blockchain)
+pub fn sign_with_context(message: &[u8], sk: &PrivateKey, pk: &PublicKey, context: &[u8]) -> Signature {
     let mut rng = rand::thread_rng();
 
     // 1. Generate random nonce (40 bits = 2 complete cycles, 5 bytes)
@@ -393,10 +399,11 @@ fn sign(message: &[u8], sk: &PrivateKey, pk: &PublicKey) -> Signature {
     // 2. Encrypt nonce with public key: C = Encode(nonce, Dict_pub)
     let commitment = encrypt(&nonce, pk);
 
-    // 3. Compute challenge: e = Hash(C || message)
+    // 3. Compute challenge: e = Hash(C || message || context)
     let mut hasher = Sha256::new();
     hasher.update(&commitment);
     hasher.update(message);
+    hasher.update(context);
     let challenge = hasher.finalize();
 
     // 4. Decrypt commitment: r = Decode(C, Dict_pub_inverse)
@@ -416,11 +423,17 @@ fn sign(message: &[u8], sk: &PrivateKey, pk: &PublicKey) -> Signature {
 
 /// Verify a zero-knowledge signature
 /// Returns true if signature is valid
-fn verify(message: &[u8], signature: &Signature, pk: &PublicKey) -> bool {
-    // 1. Compute challenge: e = Hash(C || message)
+pub fn verify(message: &[u8], signature: &Signature, pk: &PublicKey) -> bool {
+    verify_with_context(message, signature, pk, &[])
+}
+
+/// Verify with additional context (e.g., block hash for blockchain)
+pub fn verify_with_context(message: &[u8], signature: &Signature, pk: &PublicKey, context: &[u8]) -> bool {
+    // 1. Compute challenge: e = Hash(C || message || context)
     let mut hasher = Sha256::new();
     hasher.update(&signature.commitment);
     hasher.update(message);
+    hasher.update(context);
     let challenge = hasher.finalize();
 
     // 2. Recover nonce: r = s XOR e (only use first bytes of challenge)
